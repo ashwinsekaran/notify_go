@@ -74,13 +74,13 @@ seq 1 20 | ./notify --url=http://localhost:8080 -i 3s
 go test -race -v ./...
 ```
 
-Mock server prints each received message with timestamp and sequence number:
+Mock server prints each received message with timestamp:
 
 ```
-2026/04/17 09:00:00 mock server listening on :8080 — waiting for notifications...
-[09:00:02] #1: hello
-[09:00:02] #2: world
-[09:00:02] #3: foo
+2026/04/17 09:00:00 mock server listening on :8080
+09:00:02 - hello
+09:00:02 - world
+09:00:02 - foo
 ```
 
 ## Running tests

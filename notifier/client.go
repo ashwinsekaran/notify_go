@@ -21,45 +21,18 @@ type Client struct {
 	httpClient   *http.Client
 	queue        chan string
 	errorHandler ErrorHandler
-	workers      int
 	wg           sync.WaitGroup
 }
 
-// Option configures a Client.
-type Option func(*Client)
-
-// WithWorkers sets the number of concurrent HTTP workers (default 10).
-func WithWorkers(n int) Option {
-	return func(c *Client) { c.workers = n }
-}
-
-// WithQueueSize sets the size of the internal message queue (default 1000).
-func WithQueueSize(n int) Option {
-	return func(c *Client) { c.queue = make(chan string, n) }
-}
-
-// WithErrorHandler sets a callback invoked on delivery failures or dropped messages.
-func WithErrorHandler(h ErrorHandler) Option {
-	return func(c *Client) { c.errorHandler = h }
-}
-
-// WithHTTPClient sets a custom http.Client.
-func WithHTTPClient(hc *http.Client) Option {
-	return func(c *Client) { c.httpClient = hc }
-}
-
 // New creates and starts a Client. Call Close to drain and shut it down.
-func New(url string, opts ...Option) *Client {
+func New(url string, errorHandler ErrorHandler) *Client {
 	c := &Client{
-		url:        url,
-		httpClient: &http.Client{},
-		queue:      make(chan string, defaultQueueSize),
-		workers:    defaultWorkers,
+		url:          url,
+		httpClient:   &http.Client{},
+		queue:        make(chan string, defaultQueueSize),
+		errorHandler: errorHandler,
 	}
-	for _, o := range opts {
-		o(c)
-	}
-	for i := 0; i < c.workers; i++ {
+	for i := 0; i < defaultWorkers; i++ {
 		c.wg.Add(1)
 		go c.worker()
 	}

@@ -24,11 +24,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	client := notifier.New(*url,
-		notifier.WithErrorHandler(func(msg string, err error) {
-			log.Printf("notification error: %v (message: %q)", err, msg)
-		}),
-	)
+	client := notifier.New(*url, func(msg string, err error) {
+		log.Printf("notification error: %v (message: %q)", err, msg)
+	})
 	defer client.Close()
 
 	lines := make(chan string, 100)

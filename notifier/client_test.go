@@ -52,7 +52,7 @@ func waitFor(t *testing.T, timeout time.Duration, condition func() bool) bool {
 func TestNotify_MessageDelivered(t *testing.T) {
 	srv, messages := startServer(t)
 
-	client := New(srv.URL)
+	client := New(srv.URL, nil)
 	defer client.Close()
 
 	client.Notify("hello")
@@ -73,7 +73,7 @@ func TestNotify_MessageDelivered(t *testing.T) {
 func TestNotify_MultipleMessages(t *testing.T) {
 	srv, messages := startServer(t)
 
-	client := New(srv.URL)
+	client := New(srv.URL, nil)
 	defer client.Close()
 
 	want := []string{"one", "two", "three"}
@@ -90,8 +90,8 @@ func TestNotify_MultipleMessages(t *testing.T) {
 }
 
 // TestNotify_QueueFull verifies the error handler is called when queue is full.
+// Fills the queue by blocking all workers, then sends one more message.
 func TestNotify_QueueFull(t *testing.T) {
-	// use a server that blocks forever so workers stay busy and queue fills up
 	blocked := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-blocked // hang until we explicitly unblock
@@ -100,23 +100,16 @@ func TestNotify_QueueFull(t *testing.T) {
 	var mu sync.Mutex
 	var dropped []string
 
-	client := New(srv.URL,
-		WithQueueSize(1),
-		WithWorkers(1),
-		WithErrorHandler(func(msg string, err error) {
-			mu.Lock()
-			dropped = append(dropped, msg)
-			mu.Unlock()
-		}),
-	)
+	client := New(srv.URL, func(msg string, err error) {
+		mu.Lock()
+		dropped = append(dropped, msg)
+		mu.Unlock()
+	})
 
-	// first message: worker picks it up and blocks on the server
-	// second message: sits in the queue (size=1)
-	// third message: queue is full → dropped → error handler called
-	client.Notify("msg1")
-	time.Sleep(50 * time.Millisecond) // let worker pick up msg1
-	client.Notify("msg2")
-	client.Notify("msg3") // should be dropped
+	// fill all workers (10) + full queue (1000), then send one more to trigger drop
+	for i := 0; i < defaultWorkers+defaultQueueSize+1; i++ {
+		client.Notify("msg")
+	}
 
 	ok := waitFor(t, time.Second, func() bool {
 		mu.Lock()
@@ -124,7 +117,6 @@ func TestNotify_QueueFull(t *testing.T) {
 		return len(dropped) > 0
 	})
 
-	// unblock server first, then close — avoids deadlock
 	close(blocked)
 	client.Close()
 	srv.Close()
@@ -138,7 +130,7 @@ func TestNotify_QueueFull(t *testing.T) {
 func TestClose_DrainsInFlightMessages(t *testing.T) {
 	srv, messages := startServer(t)
 
-	client := New(srv.URL)
+	client := New(srv.URL, nil)
 
 	for i := 0; i < 20; i++ {
 		client.Notify("msg")
@@ -161,13 +153,11 @@ func TestNotify_ErrorHandler(t *testing.T) {
 	var mu sync.Mutex
 	var errors []error
 
-	client := New(srv.URL,
-		WithErrorHandler(func(msg string, err error) {
-			mu.Lock()
-			errors = append(errors, err)
-			mu.Unlock()
-		}),
-	)
+	client := New(srv.URL, func(msg string, err error) {
+		mu.Lock()
+		errors = append(errors, err)
+		mu.Unlock()
+	})
 	defer client.Close()
 
 	client.Notify("hello")
