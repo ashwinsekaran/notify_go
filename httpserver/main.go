@@ -21,6 +21,6 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	log.Printf("mock server listening on :%s\n", port)
+	log.Printf("http server listening on :%s\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
