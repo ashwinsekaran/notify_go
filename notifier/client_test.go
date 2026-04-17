@@ -1,9 +1,11 @@
 package notifier
 
 import (
+	"bufio"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -48,6 +50,23 @@ func waitFor(t *testing.T, timeout time.Duration, condition func() bool) bool {
 	return false
 }
 
+// dlqLines reads all lines from the DLQ file.
+func dlqLines(path string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if line := scanner.Text(); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
 // TestNotify_MessageDelivered verifies a sent message is received by the server.
 func TestNotify_MessageDelivered(t *testing.T) {
 	srv, messages := startServer(t)
@@ -89,34 +108,30 @@ func TestNotify_MultipleMessages(t *testing.T) {
 	}
 }
 
-// TestNotify_QueueFull verifies the error handler is called when queue is full.
-// Fills the queue by blocking all workers, then sends one more message.
+// TestNotify_QueueFull verifies messages are parked in DLQ when queue is full.
 func TestNotify_QueueFull(t *testing.T) {
+	testDLQPath := "dlq/test_failed.log"
+	os.Remove(testDLQPath)
+	t.Cleanup(func() { os.Remove(testDLQPath) })
+
 	blocked := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-blocked // hang until we explicitly unblock
+		<-blocked
 	}))
 
-	var mu sync.Mutex
-	var dropped []string
-
 	client, _ := New(srv.URL, Config{Workers: 1, QueueSize: 1})
-	client.errorHandler = func(msg string, err error) {
-		mu.Lock()
-		dropped = append(dropped, msg)
-		mu.Unlock()
-	}
+	client.dlq.path = testDLQPath // use test-specific DLQ file
 
-	// worker picks up msg1 and blocks, msg2 fills the queue, msg3 is dropped
+	// worker picks up msg1 and blocks on server
+	// msg2 fills the queue (size=1)
+	// msg3 — queue full → should be parked in DLQ
 	client.Notify("msg1")
 	time.Sleep(50 * time.Millisecond)
 	client.Notify("msg2")
 	client.Notify("msg3")
 
 	ok := waitFor(t, time.Second, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(dropped) > 0
+		return len(dlqLines(testDLQPath)) > 0
 	})
 
 	close(blocked)
@@ -124,7 +139,7 @@ func TestNotify_QueueFull(t *testing.T) {
 	srv.Close()
 
 	if !ok {
-		t.Fatal("expected a dropped message but error handler was never called")
+		t.Fatal("expected msg3 to be parked in DLQ but file is empty")
 	}
 }
 
@@ -145,32 +160,27 @@ func TestClose_DrainsInFlightMessages(t *testing.T) {
 	}
 }
 
-// TestNotify_ErrorHandler verifies the error handler is called on HTTP failure.
-func TestNotify_ErrorHandler(t *testing.T) {
+// TestNotify_HTTPFail verifies failed HTTP deliveries are parked in DLQ.
+func TestNotify_HTTPFail(t *testing.T) {
+	testDLQPath := "dlq/test_failed.log"
+	os.Remove(testDLQPath)
+	t.Cleanup(func() { os.Remove(testDLQPath) })
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	t.Cleanup(srv.Close)
 
-	var mu sync.Mutex
-	var errors []error
-
 	client, _ := New(srv.URL)
-	client.errorHandler = func(msg string, err error) {
-		mu.Lock()
-		errors = append(errors, err)
-		mu.Unlock()
-	}
+	client.dlq.path = testDLQPath
 	defer client.Close()
 
 	client.Notify("hello")
 
 	ok := waitFor(t, time.Second, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(errors) > 0
+		return len(dlqLines(testDLQPath)) > 0
 	})
 	if !ok {
-		t.Fatal("expected error handler to be called on HTTP 500")
+		t.Fatal("expected failed message to be parked in DLQ")
 	}
 }
