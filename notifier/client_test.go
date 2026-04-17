@@ -52,7 +52,7 @@ func waitFor(t *testing.T, timeout time.Duration, condition func() bool) bool {
 func TestNotify_MessageDelivered(t *testing.T) {
 	srv, messages := startServer(t)
 
-	client := New(srv.URL, nil)
+	client, _ := New(srv.URL)
 	defer client.Close()
 
 	client.Notify("hello")
@@ -73,7 +73,7 @@ func TestNotify_MessageDelivered(t *testing.T) {
 func TestNotify_MultipleMessages(t *testing.T) {
 	srv, messages := startServer(t)
 
-	client := New(srv.URL, nil)
+	client, _ := New(srv.URL)
 	defer client.Close()
 
 	want := []string{"one", "two", "three"}
@@ -100,16 +100,18 @@ func TestNotify_QueueFull(t *testing.T) {
 	var mu sync.Mutex
 	var dropped []string
 
-	client := New(srv.URL, func(msg string, err error) {
+	client, _ := New(srv.URL, Config{Workers: 1, QueueSize: 1})
+	client.errorHandler = func(msg string, err error) {
 		mu.Lock()
 		dropped = append(dropped, msg)
 		mu.Unlock()
-	})
-
-	// fill all workers (10) + full queue (1000), then send one more to trigger drop
-	for i := 0; i < defaultWorkers+defaultQueueSize+1; i++ {
-		client.Notify("msg")
 	}
+
+	// worker picks up msg1 and blocks, msg2 fills the queue, msg3 is dropped
+	client.Notify("msg1")
+	time.Sleep(50 * time.Millisecond)
+	client.Notify("msg2")
+	client.Notify("msg3")
 
 	ok := waitFor(t, time.Second, func() bool {
 		mu.Lock()
@@ -130,7 +132,7 @@ func TestNotify_QueueFull(t *testing.T) {
 func TestClose_DrainsInFlightMessages(t *testing.T) {
 	srv, messages := startServer(t)
 
-	client := New(srv.URL, nil)
+	client, _ := New(srv.URL)
 
 	for i := 0; i < 20; i++ {
 		client.Notify("msg")
@@ -153,11 +155,12 @@ func TestNotify_ErrorHandler(t *testing.T) {
 	var mu sync.Mutex
 	var errors []error
 
-	client := New(srv.URL, func(msg string, err error) {
+	client, _ := New(srv.URL)
+	client.errorHandler = func(msg string, err error) {
 		mu.Lock()
 		errors = append(errors, err)
 		mu.Unlock()
-	})
+	}
 	defer client.Close()
 
 	client.Notify("hello")

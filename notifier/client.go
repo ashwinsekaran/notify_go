@@ -3,6 +3,7 @@ package notifier
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 )
@@ -15,28 +16,53 @@ const (
 // ErrorHandler is called when a notification fails to be delivered.
 type ErrorHandler func(message string, err error)
 
+// Config holds optional configuration for a Client.
+// Example - (Workers: 10, QueueSize: 1000).
+type Config struct {
+	Workers   int
+	QueueSize int
+}
+
 // Client sends HTTP POST notifications to a configured URL.
 type Client struct {
 	url          string
 	httpClient   *http.Client
 	queue        chan string
 	errorHandler ErrorHandler
+	workers      int
 	wg           sync.WaitGroup
 }
 
-// New creates and starts a Client. Call Close to drain and shut it down.
-func New(url string, errorHandler ErrorHandler) *Client {
-	c := &Client{
-		url:          url,
-		httpClient:   &http.Client{},
-		queue:        make(chan string, defaultQueueSize),
-		errorHandler: errorHandler,
+// New creates and starts a Client.
+// Optionally pass a Config to override defaults: New(url) or New(url, Config{Workers: 20, QueueSize: 5000}).
+// Call Close to drain and shut it down.
+func New(url string, cfg ...Config) (*Client, error) {
+	if url == "" {
+		return nil, fmt.Errorf("url is required")
 	}
-	for i := 0; i < defaultWorkers; i++ {
+	workers, queueSize := defaultWorkers, defaultQueueSize
+	if len(cfg) > 0 {
+		if cfg[0].Workers > 0 {
+			workers = cfg[0].Workers
+		}
+		if cfg[0].QueueSize > 0 {
+			queueSize = cfg[0].QueueSize
+		}
+	}
+	c := &Client{
+		url:        url,
+		httpClient: &http.Client{},
+		queue:      make(chan string, queueSize),
+		workers:    workers,
+		errorHandler: func(msg string, err error) {
+			log.Printf("notification error: %v (message: %q)", err, msg)
+		},
+	}
+	for i := 0; i < c.workers; i++ {
 		c.wg.Add(1)
 		go c.worker()
 	}
-	return c
+	return c, nil
 }
 
 // Notify enqueues a message for delivery. It is non-blocking: if the queue is
