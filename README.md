@@ -7,8 +7,9 @@ as an HTTP POST to a configured URL on a fixed interval.
 
 - **Batching** — messages are collected and flushed on every tick (default 5s)
 - **Worker pool** — 10 concurrent HTTP workers drain the internal queue
-- **Non-blocking** — `Notify` never stalls the caller; drops messages if the queue is full and invokes the error handler
-- **Graceful shutdown** — `SIGINT`/`SIGTERM` flush pending messages before exit; `Close` waits for all in-flight requests to finish
+- **Non-blocking** — `Notify` never stalls the caller; if the queue is full, messages are parked in a DLQ file for retry
+- **DLQ** — failed or dropped messages are written to `dlq/failed.log` and replayed every 30s, and on shutdown
+- **Graceful shutdown** — `SIGINT`/`SIGTERM` flush pending messages and replay DLQ before exit
 
 ## Build
 
@@ -16,92 +17,85 @@ as an HTTP POST to a configured URL on a fixed interval.
 go build -o notify .
 ```
 
-## Usage
-
-```bash
-# basic
-echo "hello world" | ./notify --url=http://localhost:8080
-
-# custom interval
-echo "hello world" | ./notify --url=http://localhost:8080 -i 2s
-
-# interactive — type lines, they are flushed every 5s
-./notify --url=http://localhost:8080 -i 5s
-
-# pipe a file
-cat messages.txt | ./notify --url=http://localhost:8080 -i 1s
-```
-
-### Flags
+## Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--url` | required | URL to POST notifications to |
 | `--interval` / `-i` | `5s` | How often to flush and send batched messages |
+| `--workers` | `10` | Number of concurrent HTTP workers |
+| `--queue-size` | `1000` | Internal message queue size |
 
-## Testing manually
+## Quick start
 
-Start the mock server in one terminal:
-
+**Terminal 1 — start HTTP server:**
 ```bash
-go run ./mockserver
+go run ./httpserver
+
 # optional: custom port
-go run ./mockserver 9090
+go run ./httpserver 9090
 ```
 
-Then in another terminal:
-
+**Terminal 2 — build and run:**
 ```bash
-# build the binary first
 go build -o notify .
-
-# scenario 1 — basic pipe
-echo -e "hello\nworld\nfoo" | ./notify --url=http://localhost:8080 -i 2s
-
-# scenario 2 — batch of 20, all flushed at once after interval
-seq 1 20 | ./notify --url=http://localhost:8080 -i 3s
-
-# scenario 3 — interactive typing
-./notify --url=http://localhost:8080 -i 5s
-# type lines manually, wait 5s, see them appear in Terminal 1
-# press Ctrl+C to exit
-
-# scenario 4 — graceful shutdown (Ctrl+C flushes pending messages)
-./notify --url=http://localhost:8080 -i 60s
-# type some lines, press Ctrl+C before 60s — messages still flush before exit
-
-# run tests
-go test -race -v ./...
 ```
 
-Mock server prints each received message with timestamp:
+## Scenarios
 
-```
-2026/04/17 09:00:00 mock server listening on :8080
-09:00:02 - hello
-09:00:02 - world
-09:00:02 - foo
-```
-
-## Running tests
-
+### Scenario 1 — pipe a file
 ```bash
-# run all tests
-go test ./...
+# 100 messages
+cat messages_100.txt | ./notify --url=http://localhost:8080 -i 2s
 
-# with race detector (recommended)
-go test -race ./...
+# 5000 messages
+cat messages_5000.txt | ./notify --url=http://localhost:8080 -i 2s
+```
+Messages are batched and flushed every 2s. Watch Terminal 1 to see them arrive.
 
-# verbose output
-go test -v ./...
+### Scenario 2 — interactive typing
+```bash
+./notify --url=http://localhost:8080 -i 5s
+```
+Type lines manually. Every 5s, all typed lines are sent. Press `Ctrl+C` to exit.
+
+### Scenario 3 — graceful shutdown
+```bash
+./notify --url=http://localhost:8080 -i 60s
+```
+Type some lines, press `Ctrl+C` before 60s — pending messages are still flushed before exit.
+
+### Scenario 4 — DLQ (queue overflow)
+```bash
+./notify --url=http://localhost:8080 -i 60s --workers=1 --queue-size=10
+```
+Type more than 10 lines quickly. Messages that overflow the queue are parked in `dlq/failed.log` and replayed automatically every 30s.
+
+### Scenario 5 — DLQ (server down)
+```bash
+# start notify WITHOUT the mock server running
+./notify --url=http://localhost:8080 -i 5s --workers=1 --queue-size=10
+```
+Type some lines. HTTP POSTs fail → messages written to `dlq/failed.log`.
+
+Check the file:
+```bash
+cat dlq/failed.log
 ```
 
-### Test coverage
+Then start the HTTP server:
+```bash
+go run ./httpserver
+```
+Wait 30s — DLQ worker replays all messages automatically. File is cleared after successful delivery.
 
-| Test | What it verifies |
-|------|-----------------|
-| `TestNotify_MessageDelivered` | single message is delivered successfully |
-| `TestNotify_MultipleMessages` | all messages in a batch are delivered |
-| `TestNotify_QueueFull` | error handler is called when queue is full |
-| `TestClose_DrainsInFlightMessages` | `Close` waits for all in-flight requests |
-| `TestNotify_ErrorHandler` | error handler is called on HTTP failure |
+### Scenario 6 — large file with overflow
+```bash
+# 100 messages — small queue to trigger DLQ overflow
+cat messages_100.txt | ./notify --url=http://localhost:8080 -i 3s --workers=1 --queue-size=10
+
+# 5000 messages — default queue, overflow expected
+cat messages_5000.txt | ./notify --url=http://localhost:8080 -i 3s
+```
+Some messages overflow to DLQ and are replayed on shutdown.
+
