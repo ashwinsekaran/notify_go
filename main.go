@@ -17,18 +17,19 @@ func main() {
 	url := flag.String("url", "", "URL to POST notifications to (required)")
 	interval := flag.Duration("interval", 5*time.Second, "Notification send interval")
 	flag.DurationVar(interval, "i", 5*time.Second, "Notification send interval (shorthand)")
+	workers := flag.Int("workers", 10, "Number of concurrent HTTP workers")
+	queueSize := flag.Int("queue-size", 1000, "Internal message queue size")
 	flag.Parse()
 
 	if *url == "" {
-		fmt.Fprintln(os.Stderr, "usage: notify --url=URL [-i interval]")
+		fmt.Fprintln(os.Stderr, "usage: notify --url=URL [-i interval] [--workers N] [--queue-size N]")
 		os.Exit(1)
 	}
 
-	client := notifier.New(*url,
-		notifier.WithErrorHandler(func(msg string, err error) {
-			log.Printf("notification error: %v (message: %q)", err, msg)
-		}),
-	)
+	client, err := notifier.New(*url, notifier.Config{Workers: *workers, QueueSize: *queueSize})
+	if err != nil {
+		log.Fatalf("notify client - %v", err)
+	}
 	defer client.Close()
 
 	lines := make(chan string, 100)
